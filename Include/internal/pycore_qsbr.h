@@ -116,11 +116,23 @@ _Py_qsbr_shared_current(struct _qsbr_shared *shared)
 
 // Reports a quiescent state: the caller no longer holds any pointer to shared
 // data not protected by locks or reference counts.
+//
+// This is called on every eval loop back-edge and call, but the shared write
+// sequence only advances when memory is retired.  Only the owning thread
+// writes `qsbr->seq`, so a relaxed load of it is exact.  If it already equals
+// the current write sequence, the value seen by qsbr_poll_scan() would not
+// change: this thread observed that sequence (with acquire) earlier, so none
+// of its later accesses can reach memory retired for a goal <= seq.  Skipping
+// the redundant store avoids a store-release on every call (an STLR on
+// AArch64, which also delays the next load-acquire) and keeps the cache line
+// clean for threads scanning it.
 static inline void
 _Py_qsbr_quiescent_state(struct _qsbr_thread_state *qsbr)
 {
     uint64_t seq = _Py_qsbr_shared_current(qsbr->shared);
-    _Py_atomic_store_uint64_release(&qsbr->seq, seq);
+    if (_Py_atomic_load_uint64_relaxed(&qsbr->seq) != seq) {
+        _Py_atomic_store_uint64_release(&qsbr->seq, seq);
+    }
 }
 
 // Have the read sequences advanced to the given goal? Like `_Py_qsbr_poll()`,
